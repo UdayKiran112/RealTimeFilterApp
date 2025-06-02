@@ -68,23 +68,34 @@ class FilterRenderer {
         vertexDescriptor.layouts[0].stepFunction = .perVertex
 
         let bufferSize = quadVertices.count * MemoryLayout<Float>.size
-        quadVertexBuffer = device.makeBuffer(bytes: quadVertices, length: bufferSize, options: [])
+        guard let vertexBuffer = device.makeBuffer(bytes: quadVertices, length: bufferSize, options: []) else {
+            return nil
+        }
+        quadVertexBuffer = vertexBuffer
 
-        samplerState = FilterRenderer.makeDefaultSampler(device: device)
+        guard let sampler = FilterRenderer.makeDefaultSampler(device: device) else {
+            return nil
+        }
+        samplerState = sampler
 
-        buildPipeline(mtkView: mtkView)
+        do {
+            try buildPipeline(mtkView: mtkView)
+        } catch {
+            print("Failed to build pipeline: \(error)")
+            return nil
+        }
         createIntermediateTextures(size: mtkView.drawableSize)
     }
 
-    func buildPipeline(mtkView: MTKView) {
+    func buildPipeline(mtkView: MTKView) throws {
         guard let library = device.makeDefaultLibrary() else {
-            fatalError("Could not load Metal library")
+            throw NSError(domain: "FilterRenderer", code: 1, userInfo: [NSLocalizedDescriptionKey: "Could not load Metal library"])
         }
 
         // Vertex and fragment functions for vertex warp + color effects
         guard let vertexFunc = library.makeFunction(name: "vertexWarp"),
               let fragmentFunc = library.makeFunction(name: "fragmentEffects") else {
-            fatalError("Failed to find vertexWarp or fragmentEffects function")
+            throw NSError(domain: "FilterRenderer", code: 2, userInfo: [NSLocalizedDescriptionKey: "Failed to find vertexWarp or fragmentEffects function"])
         }
 
         let pipelineDesc = MTLRenderPipelineDescriptor()
@@ -93,18 +104,24 @@ class FilterRenderer {
         pipelineDesc.colorAttachments[0].pixelFormat = mtkView.colorPixelFormat
         pipelineDesc.vertexDescriptor = vertexDescriptor
 
-        pipelineState = try! device.makeRenderPipelineState(descriptor: pipelineDesc)
+        pipelineState = try device.makeRenderPipelineState(descriptor: pipelineDesc)
 
         // Compute pipelines for filters
-        computePipelineBlurH = try! device.makeComputePipelineState(function: library.makeFunction(name: "gaussianBlurHorizontal")!)
-        computePipelineBlurV = try! device.makeComputePipelineState(function: library.makeFunction(name: "gaussianBlurVertical")!)
-        computePipelineSobel = try! device.makeComputePipelineState(function: library.makeFunction(name: "sobelEdgeDetection")!)
+        guard let blurHFunc = library.makeFunction(name: "gaussianBlurHorizontal"),
+              let blurVFunc = library.makeFunction(name: "gaussianBlurVertical"),
+              let sobelFunc = library.makeFunction(name: "sobelEdgeDetection") else {
+            throw NSError(domain: "FilterRenderer", code: 3, userInfo: [NSLocalizedDescriptionKey: "Failed to find one or more compute shader functions"])
+        }
+
+        computePipelineBlurH = try device.makeComputePipelineState(function: blurHFunc)
+        computePipelineBlurV = try device.makeComputePipelineState(function: blurVFunc)
+        computePipelineSobel = try device.makeComputePipelineState(function: sobelFunc)
     }
 
     func createIntermediateTextures(size: CGSize) {
         let texDesc = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .bgra8Unorm,
-                                                               width: Int(size.width),
-                                                               height: Int(size.height),
+                                                               width: max(Int(size.width), 1),
+                                                               height: max(Int(size.height), 1),
                                                                mipmapped: false)
         texDesc.usage = [.shaderRead, .shaderWrite, .renderTarget]
 
@@ -145,7 +162,6 @@ class FilterRenderer {
 
         switch currentFilter {
         case .gaussianBlur:
-            // Horizontal blur pass
             if let encoderH = commandBuffer.makeComputeCommandEncoder() {
                 encoderH.setComputePipelineState(computePipelineBlurH)
                 encoderH.setTexture(inputTexture, index: 0)
@@ -156,7 +172,6 @@ class FilterRenderer {
                 encoderH.endEncoding()
             }
 
-            // Vertical blur pass
             if let encoderV = commandBuffer.makeComputeCommandEncoder() {
                 encoderV.setComputePipelineState(computePipelineBlurV)
                 encoderV.setTexture(intermediateTexture, index: 0)
@@ -170,7 +185,7 @@ class FilterRenderer {
             return outputTexture
 
         case .edgeDetection:
-            // Gaussian blur first for smoothing
+            // Gaussian blur pass (horizontal)
             if let encoderH = commandBuffer.makeComputeCommandEncoder() {
                 encoderH.setComputePipelineState(computePipelineBlurH)
                 encoderH.setTexture(inputTexture, index: 0)
@@ -180,6 +195,8 @@ class FilterRenderer {
                 encoderH.dispatchThreads(threadsPerGrid, threadsPerThreadgroup: threadsPerThreadgroup)
                 encoderH.endEncoding()
             }
+
+            // Gaussian blur pass (vertical)
             if let encoderV = commandBuffer.makeComputeCommandEncoder() {
                 encoderV.setComputePipelineState(computePipelineBlurV)
                 encoderV.setTexture(intermediateTexture, index: 0)
@@ -190,7 +207,7 @@ class FilterRenderer {
                 encoderV.endEncoding()
             }
 
-            // Edge detection pass
+            // Sobel edge detection pass
             if let encoderSobel = commandBuffer.makeComputeCommandEncoder() {
                 encoderSobel.setComputePipelineState(computePipelineSobel)
                 encoderSobel.setTexture(outputTexture, index: 0)
@@ -204,7 +221,6 @@ class FilterRenderer {
             return intermediateTexture
 
         case .vertexWarp, .colorEffects:
-            // No compute pass for these, render directly
             return inputTexture
 
         case .none:
@@ -217,7 +233,6 @@ class FilterRenderer {
 
         time += 0.016 // approx 60 FPS
 
-        // Apply compute filters if needed
         let filteredTexture = applyComputeFilters(inputTexture: inputTexture, commandBuffer: commandBuffer)
 
         if currentFilter == .vertexWarp || currentFilter == .colorEffects {
@@ -227,26 +242,26 @@ class FilterRenderer {
             renderPassDesc.colorAttachments[0].storeAction = .store
             renderPassDesc.colorAttachments[0].clearColor = MTLClearColorMake(0, 0, 0, 1)
 
-            guard let renderEncoder = commandBuffer.makeRenderCommandEncoder(descriptor: renderPassDesc) else { return }
+            guard let renderEncoder = commandBuffer.makeRenderCommandEncoder(descriptor: renderPassDesc) else {
+                commandBuffer.commit()
+                return
+            }
 
             renderEncoder.setRenderPipelineState(pipelineState)
             renderEncoder.setVertexBuffer(quadVertexBuffer, offset: 0, index: 0)
 
-            // Pass time uniform to vertex shader at buffer index 2
             var currentTime = time
             renderEncoder.setVertexBytes(&currentTime, length: MemoryLayout<Float>.size, index: 2)
 
             renderEncoder.setFragmentTexture(filteredTexture, index: 0)
             renderEncoder.setFragmentSamplerState(samplerState, index: 0)
 
-            // Pass time uniform to fragment shader at buffer index 0
             renderEncoder.setFragmentBytes(&currentTime, length: MemoryLayout<Float>.size, index: 0)
 
             renderEncoder.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4)
 
             renderEncoder.endEncoding()
         } else {
-            // For other filters or none, copy the filteredTexture to the drawable directly using a blit encoder
             if let blitEncoder = commandBuffer.makeBlitCommandEncoder() {
                 blitEncoder.copy(from: filteredTexture,
                                  sourceSlice: 0,
@@ -267,13 +282,13 @@ class FilterRenderer {
         commandBuffer.commit()
     }
 
-    static func makeDefaultSampler(device: MTLDevice) -> MTLSamplerState {
+    static func makeDefaultSampler(device: MTLDevice) -> MTLSamplerState? {
         let desc = MTLSamplerDescriptor()
         desc.minFilter = .linear
         desc.magFilter = .linear
         desc.mipFilter = .notMipmapped
         desc.sAddressMode = .clampToEdge
         desc.tAddressMode = .clampToEdge
-        return device.makeSamplerState(descriptor: desc)!
+        return device.makeSamplerState(descriptor: desc)
     }
 }
