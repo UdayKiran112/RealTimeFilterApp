@@ -38,16 +38,39 @@ class ViewController: UIViewController {
         cameraManager.stopCapturing()
     }
 
+//    private func setupFilterToggleButton() {
+//        filterToggleButton = UIButton(type: .system)
+//        filterToggleButton.frame = CGRect(x: 20, y: view.safeAreaInsets.top + 20, width: 140, height: 44)
+//        filterToggleButton.backgroundColor = UIColor.black.withAlphaComponent(0.6)
+//        filterToggleButton.setTitle("Filter: Off", for: .normal)
+//        filterToggleButton.setTitleColor(.white, for: .normal)
+//        filterToggleButton.layer.cornerRadius = 8
+//        filterToggleButton.addTarget(self, action: #selector(toggleFilter), for: .touchUpInside)
+//        view.addSubview(filterToggleButton)
+//    }
+    
     private func setupFilterToggleButton() {
         filterToggleButton = UIButton(type: .system)
-        filterToggleButton.frame = CGRect(x: 20, y: view.safeAreaInsets.top + 20, width: 140, height: 44)
+        let buttonWidth: CGFloat = 140
+        let buttonHeight: CGFloat = 44
+        let bottomPadding: CGFloat = 20
+        let safeAreaBottom = view.safeAreaInsets.bottom
+
+        filterToggleButton.frame = CGRect(
+            x: 20,
+            y: view.bounds.height - buttonHeight - bottomPadding - safeAreaBottom,
+            width: buttonWidth,
+            height: buttonHeight
+        )
         filterToggleButton.backgroundColor = UIColor.black.withAlphaComponent(0.6)
         filterToggleButton.setTitle("Filter: Off", for: .normal)
         filterToggleButton.setTitleColor(.white, for: .normal)
         filterToggleButton.layer.cornerRadius = 8
         filterToggleButton.addTarget(self, action: #selector(toggleFilter), for: .touchUpInside)
+
         view.addSubview(filterToggleButton)
     }
+
 
     @objc private func toggleFilter() {
         isFilterOn.toggle()
