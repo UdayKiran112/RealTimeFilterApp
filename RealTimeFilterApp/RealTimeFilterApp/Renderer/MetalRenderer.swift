@@ -4,19 +4,28 @@ class MetalRenderer: NSObject, MTKViewDelegate {
     let device: MTLDevice
     let commandQueue: MTLCommandQueue
     var pipelineState: MTLRenderPipelineState!
+    
+    // The texture to draw, can be nil for just clear screen
     var currentTexture: MTLTexture? = nil
     
     init(mtkView: MTKView) {
-        self.device = mtkView.device!
+        guard let device = mtkView.device else {
+            fatalError("MTKView has no Metal device assigned")
+        }
+        self.device = device
         self.commandQueue = device.makeCommandQueue()!
+        
         super.init()
+        
         buildPipeline(mtkView: mtkView)
     }
     
     func buildPipeline(mtkView: MTKView) {
         let library = device.makeDefaultLibrary()!
-        let vertexFunction = library.makeFunction(name: "vertexShader")
-        let fragmentFunction = library.makeFunction(name: "fragmentShader")
+        guard let vertexFunction = library.makeFunction(name: "vertexShader"),
+              let fragmentFunction = library.makeFunction(name: "fragmentShader") else {
+            fatalError("Failed to find shader functions in the default library")
+        }
         
         let pipelineDescriptor = MTLRenderPipelineDescriptor()
         pipelineDescriptor.vertexFunction = vertexFunction
@@ -26,34 +35,36 @@ class MetalRenderer: NSObject, MTKViewDelegate {
         do {
             pipelineState = try device.makeRenderPipelineState(descriptor: pipelineDescriptor)
         } catch {
-            fatalError("Unable to create pipeline state: \(error)")
+            fatalError("Failed to create pipeline state: \(error)")
         }
     }
     
     func mtkView(_ view: MTKView, drawableSizeWillChange size: CGSize) {
-        // Handle resize if needed
+        // Handle drawable size change here if needed (e.g., update viewport or textures)
     }
     
     func draw(in view: MTKView) {
         guard let drawable = view.currentDrawable,
-              let descriptor = view.currentRenderPassDescriptor else {
+              let renderPassDescriptor = view.currentRenderPassDescriptor else {
             return
         }
         
+        // Create command buffer and encoder
         let commandBuffer = commandQueue.makeCommandBuffer()!
-        let encoder = commandBuffer.makeRenderCommandEncoder(descriptor: descriptor)!
+        let renderEncoder = commandBuffer.makeRenderCommandEncoder(descriptor: renderPassDescriptor)!
         
-        encoder.setRenderPipelineState(pipelineState)
+        renderEncoder.setRenderPipelineState(pipelineState)
         
-        // Set the camera texture or a default texture
+        // Bind texture if available
         if let texture = currentTexture {
-            encoder.setFragmentTexture(texture, index: 0)
+            renderEncoder.setFragmentTexture(texture, index: 0)
         }
         
-        // Draw full screen quad with 4 vertices (triangle strip)
-        encoder.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4)
+        // Draw fullscreen quad with 4 vertices (triangle strip)
+        renderEncoder.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4)
         
-        encoder.endEncoding()
+        renderEncoder.endEncoding()
+        
         commandBuffer.present(drawable)
         commandBuffer.commit()
     }

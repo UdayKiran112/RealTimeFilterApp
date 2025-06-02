@@ -4,57 +4,119 @@ import UIKit
 
 /// Manages camera capture and provides Metal textures for real-time processing.
 class CameraManager: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate {
+    
     let device: MTLDevice
     var onTextureReady: ((MTLTexture) -> Void)?
     
     private let captureSession = AVCaptureSession()
     private let videoOutput = AVCaptureVideoDataOutput()
     private let textureCache: CVMetalTextureCache
-
-    init(device: MTLDevice) {
+    private var isSessionRunning = false
+    
+    // MARK: - Init
+    
+    init?(device: MTLDevice) {
         self.device = device
-
-        // Create texture cache for converting CVPixelBuffer to MTLTexture
+        
         var cache: CVMetalTextureCache?
-        CVMetalTextureCacheCreate(kCFAllocatorDefault, nil, device, nil, &cache)
-        self.textureCache = cache!
-
+        let status = CVMetalTextureCacheCreate(kCFAllocatorDefault, nil, device, nil, &cache)
+        guard status == kCVReturnSuccess, let createdCache = cache else {
+            print("Failed to create CVMetalTextureCache")
+            return nil
+        }
+        self.textureCache = createdCache
+        
         super.init()
-        setupCaptureSession()
+        
+        checkPermissionAndSetup()
         addOrientationObserver()
     }
-
-    /// Configure the camera capture session
+    
+    deinit {
+        NotificationCenter.default.removeObserver(self)
+        UIDevice.current.endGeneratingDeviceOrientationNotifications()
+    }
+    
+    // MARK: - Permission & Setup
+    
+    private func checkPermissionAndSetup() {
+        switch AVCaptureDevice.authorizationStatus(for: .video) {
+        case .authorized:
+            setupCaptureSession()
+        case .notDetermined:
+            AVCaptureDevice.requestAccess(for: .video) { [weak self] granted in
+                if granted {
+                    DispatchQueue.main.async {
+                        self?.setupCaptureSession()
+                    }
+                } else {
+                    print("Camera permission denied")
+                }
+            }
+        case .denied, .restricted:
+            print("Camera access denied or restricted")
+        @unknown default:
+            print("Unknown authorization status")
+        }
+    }
+    
     private func setupCaptureSession() {
         captureSession.beginConfiguration()
-        captureSession.sessionPreset = .hd1280x720
-
-        guard let camera = AVCaptureDevice.default(.builtInWideAngleCamera, for: .video, position: .back),
-              let input = try? AVCaptureDeviceInput(device: camera) else {
-            fatalError("Cannot access back camera")
+        
+        // Configure session preset (optional, choose based on performance/quality needs)
+        captureSession.sessionPreset = .high
+        
+        guard let camera = AVCaptureDevice.default(for: .video) else {
+            print("Error: No video camera available")
+            captureSession.commitConfiguration()
+            return
         }
-
-        if captureSession.canAddInput(input) {
-            captureSession.addInput(input)
+        
+        do {
+            let input = try AVCaptureDeviceInput(device: camera)
+            if captureSession.canAddInput(input) {
+                captureSession.addInput(input)
+            } else {
+                print("Cannot add camera input to capture session")
+                captureSession.commitConfiguration()
+                return
+            }
+            
+            // Limit frame rate to 30 FPS for performance (optional)
+            try camera.lockForConfiguration()
+            camera.activeVideoMinFrameDuration = CMTime(value: 1, timescale: 30)
+            camera.activeVideoMaxFrameDuration = CMTime(value: 1, timescale: 30)
+            camera.unlockForConfiguration()
+            
+        } catch {
+            print("Error setting up camera input: \(error.localizedDescription)")
+            captureSession.commitConfiguration()
+            return
         }
-
+        
         videoOutput.videoSettings = [
             kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA
         ]
         videoOutput.alwaysDiscardsLateVideoFrames = true
-
+        
         let queue = DispatchQueue(label: "CameraOutputQueue")
         videoOutput.setSampleBufferDelegate(self, queue: queue)
-
+        
         if captureSession.canAddOutput(videoOutput) {
             captureSession.addOutput(videoOutput)
+        } else {
+            print("Cannot add video output")
+            captureSession.commitConfiguration()
+            return
         }
-
+        
         updateVideoOrientation()
+        
         captureSession.commitConfiguration()
     }
-
-    /// Observe device orientation changes and update video orientation accordingly
+    
+    // MARK: - Orientation
+    
     private func addOrientationObserver() {
         NotificationCenter.default.addObserver(
             self,
@@ -64,98 +126,80 @@ class CameraManager: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate {
         )
         UIDevice.current.beginGeneratingDeviceOrientationNotifications()
     }
-
+    
     @objc private func deviceOrientationDidChange() {
         updateVideoOrientation()
     }
-
-    /// Update AVCaptureVideoOrientation based on current device orientation
+    
     private func updateVideoOrientation() {
         guard let connection = videoOutput.connection(with: .video),
               connection.isVideoOrientationSupported else {
             return
         }
-
+        
         let deviceOrientation = UIDevice.current.orientation
         let videoOrientation: AVCaptureVideoOrientation
-
+        
         switch deviceOrientation {
         case .portrait:
             videoOrientation = .portrait
         case .portraitUpsideDown:
             videoOrientation = .portraitUpsideDown
         case .landscapeLeft:
-            videoOrientation = .landscapeRight
+            videoOrientation = .landscapeRight  // compensates for camera rotation
         case .landscapeRight:
-            videoOrientation = .landscapeLeft
+            videoOrientation = .landscapeLeft   // compensates for camera rotation
         default:
-            // Default to portrait if unknown orientation
-            videoOrientation = .portrait
+            return
         }
-
+        
         connection.videoOrientation = videoOrientation
     }
-
-    /// Start capturing camera frames
+    
+    // MARK: - Capture Control
+    
     func startCapturing() {
-        DispatchQueue.global(qos: .userInitiated).async {
-            self.captureSession.startRunning()
+        guard !isSessionRunning else { return }
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            self?.captureSession.startRunning()
+            self?.isSessionRunning = true
         }
     }
-
-    /// Stop capturing camera frames
+    
     func stopCapturing() {
-        if captureSession.isRunning {
-            captureSession.stopRunning()
-        }
+        guard isSessionRunning else { return }
+        captureSession.stopRunning()
+        isSessionRunning = false
     }
-
-    /// Toggle torch (flashlight) on or off
-    func toggleTorch(on: Bool) {
-        guard let device = AVCaptureDevice.default(for: .video),
-              device.hasTorch else { return }
-
-        do {
-            try device.lockForConfiguration()
-            device.torchMode = on ? .on : .off
-            device.unlockForConfiguration()
-        } catch {
-            print("Torch could not be used: \(error)")
-        }
-    }
-
-    /// Capture output delegate method to convert CMSampleBuffer to Metal texture and pass it back
+    
+    // MARK: - Delegate: Capture Output
+    
     func captureOutput(_ output: AVCaptureOutput,
                        didOutput sampleBuffer: CMSampleBuffer,
                        from connection: AVCaptureConnection) {
         guard let pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
-
-        var cvTextureOut: CVMetalTexture?
+        
         let width = CVPixelBufferGetWidth(pixelBuffer)
         let height = CVPixelBufferGetHeight(pixelBuffer)
-
-        let result = CVMetalTextureCacheCreateTextureFromImage(kCFAllocatorDefault,
-                                                               textureCache,
-                                                               pixelBuffer,
-                                                               nil,
-                                                               .bgra8Unorm,
-                                                               width,
-                                                               height,
-                                                               0,
-                                                               &cvTextureOut)
-
+        
+        var cvTextureOut: CVMetalTexture?
+        let result = CVMetalTextureCacheCreateTextureFromImage(
+            kCFAllocatorDefault,
+            textureCache,
+            pixelBuffer,
+            nil,
+            .bgra8Unorm,
+            width,
+            height,
+            0,
+            &cvTextureOut)
+        
         if result == kCVReturnSuccess,
            let cvTexture = cvTextureOut,
            let texture = CVMetalTextureGetTexture(cvTexture) {
-            // Pass raw texture to caller, no filter applied here
-            DispatchQueue.main.async {
-                self.onTextureReady?(texture)
+            DispatchQueue.main.async { [weak self] in
+                self?.onTextureReady?(texture)
             }
         }
-    }
-
-    deinit {
-        NotificationCenter.default.removeObserver(self)
-        UIDevice.current.endGeneratingDeviceOrientationNotifications()
     }
 }
