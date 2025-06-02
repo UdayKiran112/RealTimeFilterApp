@@ -1,35 +1,37 @@
 #include <metal_stdlib>
 using namespace metal;
 
-// Vertex data for a fullscreen quad
+// Vertex input struct
+struct VertexIn {
+    float2 position [[attribute(0)]];
+    float2 texCoord [[attribute(1)]];
+};
+
+// Vertex output struct
 struct VertexOut {
     float4 position [[position]];
     float2 texCoord;
 };
 
-vertex VertexOut vertexShader(uint vertexID [[vertex_id]]) {
-    float4 positions[4] = {
-        float4(-1,  1, 0, 1),
-        float4(-1, -1, 0, 1),
-        float4( 1,  1, 0, 1),
-        float4( 1, -1, 0, 1)
-    };
-    
-    float2 texCoords[4] = {
-        float2(0, 0),
-        float2(0, 1),
-        float2(1, 0),
-        float2(1, 1)
-    };
-    
+// Vertex shader
+vertex VertexOut vertex_passthrough(VertexIn in [[stage_in]]) {
     VertexOut out;
-    out.position = positions[vertexID];
-    out.texCoord = texCoords[vertexID];
+    out.position = float4(in.position, 0, 1);
+    out.texCoord = in.texCoord;
     return out;
 }
 
-fragment float4 fragmentShader(VertexOut in [[stage_in]],
-                               texture2d<float> tex [[texture(0)]]) {
-    constexpr sampler s(address::clamp_to_edge);
-    return tex.sample(s, in.texCoord);
+// Fragment shader with grayscale toggle
+fragment float4 fragment_filter(VertexOut in [[stage_in]],
+                                texture2d<float> inputTexture [[texture(0)]],
+                                sampler s [[sampler(0)]],
+                                constant bool& filterEnabled [[buffer(0)]]) {
+
+    float4 color = inputTexture.sample(s, in.texCoord);
+    if (filterEnabled) {
+        float gray = dot(color.rgb, float3(0.299, 0.587, 0.114));
+        return float4(gray, gray, gray, color.a);
+    } else {
+        return color;
+    }
 }
