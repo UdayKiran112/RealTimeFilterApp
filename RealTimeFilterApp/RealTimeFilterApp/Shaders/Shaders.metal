@@ -4,7 +4,6 @@ using namespace metal;
 #define K_EPSILON 1e-5
 #define PI 3.14159265359
 
-
 inline float2 safeNormalize(float2 v) {
     float len = length(v);
     return (len > K_EPSILON) ? (v / len) : float2(0.0);
@@ -47,7 +46,8 @@ vertex VertexOut vertexWarp(VertexIn in [[stage_in]],
     return out;
 }
 
-// --- Fragment Shader with Effects ---
+// --- Fragment Shader with Basic + Advanced Effects ---
+
 inline float rand(float2 co) {
     return fract(sin(dot(co, float2(12.9898, 78.233))) * 43758.5453);
 }
@@ -55,10 +55,52 @@ inline float rand(float2 co) {
 fragment float4 fragmentEffects(VertexOut in [[stage_in]],
                                 texture2d<float, access::sample> inputTexture [[texture(0)]],
                                 constant float& time [[buffer(0)]],
+                                constant int& filterIndex [[buffer(1)]],
                                 sampler samp [[sampler(0)]]) {
     float2 uv = in.texCoord;
     float2 resolution = float2(inputTexture.get_width(), inputTexture.get_height());
 
+    float4 color = inputTexture.sample(samp, uv);
+
+    // --- Basic Filters ---
+    switch (filterIndex) {
+        case 0: // None (original)
+            break;
+
+        case 1: { // Grayscale
+            float gray = dot(color.rgb, float3(0.299, 0.587, 0.114));
+            color = float4(gray, gray, gray, color.a);
+            break;
+        }
+        case 2: { // Invert
+            color = float4(1.0 - color.rgb, color.a);
+            break;
+        }
+        case 3: { // Sepia
+            float3 sepia = float3(
+                dot(color.rgb, float3(0.393, 0.769, 0.189)),
+                dot(color.rgb, float3(0.349, 0.686, 0.168)),
+                dot(color.rgb, float3(0.272, 0.534, 0.131))
+            );
+            color = float4(min(sepia, float3(1.0)), color.a);
+            break;
+        }
+        case 4: { // Brightness +0.2
+            color.rgb += 0.2;
+            break;
+        }
+        case 5: { // Contrast adjustment (+20%)
+            float contrast = 1.2;
+            color.rgb = (color.rgb - 0.5) * contrast + 0.5;
+            break;
+        }
+        default:
+            break;
+    }
+
+    // --- Advanced Color Effects ---
+
+    // Chromatic Aberration
     constexpr float aberrationAmount = 0.005;
     float2 offsetR = float2(aberrationAmount, 0.0);
     float2 offsetB = float2(-aberrationAmount, 0.0);
@@ -66,21 +108,24 @@ fragment float4 fragmentEffects(VertexOut in [[stage_in]],
     float r = inputTexture.sample(samp, uv + offsetR).r;
     float g = inputTexture.sample(samp, uv).g;
     float b = inputTexture.sample(samp, uv + offsetB).b;
-    float4 color = float4(r, g, b, 1.0);
+    float4 chromaColor = float4(r, g, b, 1.0);
 
     // Reinhard tone mapping
-    color.rgb = color.rgb / (color.rgb + float3(1.0));
+    chromaColor.rgb = chromaColor.rgb / (chromaColor.rgb + float3(1.0));
 
     // Grain
     float grain = (rand(uv * resolution + floor(time * 10.0)) - 0.5) * 0.05;
-    color.rgb += grain;
+    chromaColor.rgb += grain;
 
     // Vignette
     float2 centered = uv - 0.5;
     float vignette = smoothstep(0.8, 0.5, length(centered));
-    color.rgb *= vignette;
+    chromaColor.rgb *= vignette;
 
-    return float4(clamp(color.rgb, 0.0, 1.0), 1.0);
+    // Combine basic filter color with advanced color effects
+    float4 finalColor = float4(color.rgb * chromaColor.rgb, color.a);
+
+    return float4(clamp(finalColor.rgb, 0.0, 1.0), 1.0);
 }
 
 // --- Gaussian Blur (Shared Kernel Logic) ---

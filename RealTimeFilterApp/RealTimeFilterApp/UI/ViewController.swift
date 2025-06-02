@@ -7,14 +7,19 @@ class ViewController: UIViewController, MTKViewDelegate {
     var filterRenderer: FilterRenderer! // Your filter rendering class
 
     private var filterButton: UIButton!
-    private var selectedFilter: String = "None"
+    private var selectedFilterIndex: Int = 0
     private var currentCameraTexture: MTLTexture? = nil
 
-    // Sync filters with FilterRenderer supported filters
+    // Complete filters list matching your Metal shader's filterIndex:
     private let filters = [
-        "None",
-        "Gaussian Blur",
-        "Edge Detection"
+        "None",          // 0
+        "Grayscale",     // 1
+        "Invert",        // 2
+        "Sepia",         // 3
+        "Brightness",    // 4
+        "Contrast",      // 5
+        "Gaussian Blur", // 6
+        "Edge Detection" // 7
     ]
 
     override func viewDidLoad() {
@@ -36,7 +41,6 @@ class ViewController: UIViewController, MTKViewDelegate {
         // Setup callback when camera frame texture is ready
         cameraManager.onTextureReady = { [weak self] texture in
             guard let self = self else { return }
-            // Store the latest camera texture and trigger view redraw on main thread
             DispatchQueue.main.async {
                 self.currentCameraTexture = texture
                 self.mtkView.setNeedsDisplay()
@@ -66,7 +70,7 @@ class ViewController: UIViewController, MTKViewDelegate {
     private func setupFilterButton() {
         filterButton = UIButton(type: .system)
         filterButton.backgroundColor = UIColor.black.withAlphaComponent(0.6)
-        filterButton.setTitle("Filter: \(selectedFilter)", for: .normal)
+        filterButton.setTitle("Filter: \(filters[selectedFilterIndex])", for: .normal)
         filterButton.setTitleColor(.white, for: .normal)
         filterButton.layer.cornerRadius = 8
         filterButton.addTarget(self, action: #selector(showFilterDropdown), for: .touchUpInside)
@@ -92,16 +96,16 @@ class ViewController: UIViewController, MTKViewDelegate {
     @objc private func showFilterDropdown() {
         let alert = UIAlertController(title: "Select Filter", message: nil, preferredStyle: .actionSheet)
 
-        for filter in filters {
+        for (index, filter) in filters.enumerated() {
             let action = UIAlertAction(title: filter, style: .default) { [weak self] _ in
                 guard let self = self else { return }
-                self.selectedFilter = filter
+                self.selectedFilterIndex = index
                 self.filterButton.setTitle("Filter: \(filter)", for: .normal)
 
-                // Update filter on FilterRenderer for next draw
-                self.filterRenderer.setFilter(name: filter)
+                // Update filter on FilterRenderer with filterIndex
+                self.filterRenderer.setFilter(name: self.filters[self.selectedFilterIndex])
 
-                // Trigger redraw to reflect filter change immediately
+                // Trigger redraw immediately
                 self.mtkView.setNeedsDisplay()
             }
             alert.addAction(action)
@@ -122,16 +126,14 @@ class ViewController: UIViewController, MTKViewDelegate {
     // MARK: - MTKViewDelegate Methods
 
     func mtkView(_ view: MTKView, drawableSizeWillChange size: CGSize) {
-        // Handle size or orientation changes here if needed
+        // Handle size/orientation changes if needed
     }
 
     func draw(in view: MTKView) {
         guard let texture = currentCameraTexture,
               let drawable = view.currentDrawable else { return }
 
-        // Render current camera texture with the selected filter
-        guard let drawable = view.currentDrawable else { return }
+        // Render current camera texture with the selected filter index
         filterRenderer.render(inputTexture: texture, drawable: drawable)
-        // Present drawable handled inside filterRenderer or here if needed
     }
 }

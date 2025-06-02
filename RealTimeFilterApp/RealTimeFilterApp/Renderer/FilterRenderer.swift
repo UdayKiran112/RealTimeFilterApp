@@ -81,7 +81,7 @@ class FilterRenderer {
             fatalError("Could not load Metal library")
         }
 
-        // Your vertex and fragment functions (vertexWarp + fragmentEffects)
+        // Vertex and fragment functions for vertex warp + color effects
         guard let vertexFunc = library.makeFunction(name: "vertexWarp"),
               let fragmentFunc = library.makeFunction(name: "fragmentEffects") else {
             fatalError("Failed to find vertexWarp or fragmentEffects function")
@@ -95,6 +95,7 @@ class FilterRenderer {
 
         pipelineState = try! device.makeRenderPipelineState(descriptor: pipelineDesc)
 
+        // Compute pipelines for filters
         computePipelineBlurH = try! device.makeComputePipelineState(function: library.makeFunction(name: "gaussianBlurHorizontal")!)
         computePipelineBlurV = try! device.makeComputePipelineState(function: library.makeFunction(name: "gaussianBlurVertical")!)
         computePipelineSobel = try! device.makeComputePipelineState(function: library.makeFunction(name: "sobelEdgeDetection")!)
@@ -203,8 +204,7 @@ class FilterRenderer {
             return intermediateTexture
 
         case .vertexWarp, .colorEffects:
-            // For these filters, no compute pass needed —
-            // We'll render with vertex + fragment shaders directly later.
+            // No compute pass for these, render directly
             return inputTexture
 
         case .none:
@@ -217,10 +217,9 @@ class FilterRenderer {
 
         time += 0.016 // approx 60 FPS
 
-        // First, apply compute filters if any
+        // Apply compute filters if needed
         let filteredTexture = applyComputeFilters(inputTexture: inputTexture, commandBuffer: commandBuffer)
 
-        // For vertexWarp and colorEffects, we render with vertex + fragment shaders using pipelineState
         if currentFilter == .vertexWarp || currentFilter == .colorEffects {
             let renderPassDesc = MTLRenderPassDescriptor()
             renderPassDesc.colorAttachments[0].texture = drawable.texture
@@ -232,24 +231,22 @@ class FilterRenderer {
 
             renderEncoder.setRenderPipelineState(pipelineState)
             renderEncoder.setVertexBuffer(quadVertexBuffer, offset: 0, index: 0)
-            // <<< Fix: Pass time uniform to vertex shader at buffer index 2
+
+            // Pass time uniform to vertex shader at buffer index 2
             var currentTime = time
             renderEncoder.setVertexBytes(&currentTime, length: MemoryLayout<Float>.size, index: 2)
 
             renderEncoder.setFragmentTexture(filteredTexture, index: 0)
             renderEncoder.setFragmentSamplerState(samplerState, index: 0)
 
-            // Pass time as fragment shader uniform as well (for colorEffects)
+            // Pass time uniform to fragment shader at buffer index 0
             renderEncoder.setFragmentBytes(&currentTime, length: MemoryLayout<Float>.size, index: 0)
 
             renderEncoder.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4)
 
             renderEncoder.endEncoding()
         } else {
-            // For other filters or none, just copy filteredTexture to drawable directly with a blit or simple render pass
-
-            // We'll do a simple render pass with a basic pipeline (not shown here for brevity)
-            // For now, just copy via blit command encoder
+            // For other filters or none, copy the filteredTexture to the drawable directly using a blit encoder
             if let blitEncoder = commandBuffer.makeBlitCommandEncoder() {
                 blitEncoder.copy(from: filteredTexture,
                                  sourceSlice: 0,
