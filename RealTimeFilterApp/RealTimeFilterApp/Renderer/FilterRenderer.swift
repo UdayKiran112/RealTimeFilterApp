@@ -2,293 +2,214 @@ import Metal
 import MetalKit
 import simd
 
+// Must exactly match the `Uniforms` struct in your shaders.metal
+struct Uniforms {
+    var time: Float
+    var resolution: SIMD2<Float>
+    var mouse: SIMD2<Float>
+    var center: SIMD2<Float>
+    var radius: Float
+    var aspectRatio: Float
+    var brightness: Float
+    var contrast: Float
+    var vignetteStrength: Float
+    var filterIndex: Int32
+    var warpIndex: Int32
+}
+
 class FilterRenderer {
-    let device: MTLDevice
-    let commandQueue: MTLCommandQueue
+    private let device: MTLDevice
+    private let mtkView: MTKView
+    private let commandQueue: MTLCommandQueue
 
-    let vertexDescriptor: MTLVertexDescriptor
+    private var pipelineState: MTLRenderPipelineState!
+    private var vertexBuffer: MTLBuffer!
+    private var samplerState: MTLSamplerState!
 
-    private(set) var pipelineState: MTLRenderPipelineState!
-    private(set) var computePipelineBlurH: MTLComputePipelineState!
-    private(set) var computePipelineBlurV: MTLComputePipelineState!
-    private(set) var computePipelineSobel: MTLComputePipelineState!
-
-    private var time: Float = 0
-
-    private var intermediateTexture: MTLTexture!
-    private var outputTexture: MTLTexture!
-
-    private var viewportSize: vector_uint2 = [0, 0]
-
-    enum FilterType {
-        case none
-        case gaussianBlur
-        case edgeDetection
-        case vertexWarp      // mesh warp + sine displacement in vertex shader
-        case colorEffects    // chromatic aberration, tone mapping, grain, vignette in fragment shader
-    }
-
-    private var currentFilter: FilterType = .none
-
-    private var quadVertexBuffer: MTLBuffer!
-    private let samplerState: MTLSamplerState
-
-    private let quadVertices: [Float] = [
-        -1, -1,  0, 1,
-         1, -1,  1, 1,
-        -1,  1,  0, 0,
-         1,  1,  1, 0,
+    // Vertex data for a full-screen quad: position (float4) + texCoord (float2)
+    private let vertices: [Float] = [
+        -1,  1, 0, 1,   0, 0,
+        -1, -1, 0, 1,   0, 1,
+         1, -1, 0, 1,   1, 1,
+        -1,  1, 0, 1,   0, 0,
+         1, -1, 0, 1,   1, 1,
+         1,  1, 0, 1,   1, 0,
     ]
 
-    var filterEnabled: Bool {
-        get { currentFilter != .none }
-        set {
-            if !newValue { currentFilter = .none }
-        }
-    }
+    // Runtime-controlled filter/wave modes and filter parameters
+    private var filterIndex: Int32 = 0
+    private var warpMode: Int32 = 0
+    private var brightness: Float = 1.0
+    private var contrast: Float = 1.0
+    private var vignetteStrength: Float = 0.6
 
-    init?(device: MTLDevice, mtkView: MTKView) {
+    // Magnify warp settings
+    private var magnifyCenter = SIMD2<Float>(0.5, 0.5)
+    private var magnifyRadius: Float = 0.2
+    private var magnifyStrength: Float = 0.2
+
+    init(device: MTLDevice, mtkView: MTKView) {
         self.device = device
-        guard let queue = device.makeCommandQueue() else { return nil }
+        self.mtkView = mtkView
+
+        guard let queue = device.makeCommandQueue() else {
+            fatalError("Failed to create command queue")
+        }
         self.commandQueue = queue
 
-        self.viewportSize = vector_uint2(UInt32(mtkView.drawableSize.width), UInt32(mtkView.drawableSize.height))
-
-        vertexDescriptor = MTLVertexDescriptor()
-        vertexDescriptor.attributes[0].format = .float2
-        vertexDescriptor.attributes[0].offset = 0
-        vertexDescriptor.attributes[0].bufferIndex = 0
-
-        vertexDescriptor.attributes[1].format = .float2
-        vertexDescriptor.attributes[1].offset = MemoryLayout<SIMD2<Float>>.stride
-        vertexDescriptor.attributes[1].bufferIndex = 0
-
-        vertexDescriptor.layouts[0].stride = MemoryLayout<SIMD2<Float>>.stride * 2
-        vertexDescriptor.layouts[0].stepRate = 1
-        vertexDescriptor.layouts[0].stepFunction = .perVertex
-
-        let bufferSize = quadVertices.count * MemoryLayout<Float>.size
-        guard let vertexBuffer = device.makeBuffer(bytes: quadVertices, length: bufferSize, options: []) else {
-            return nil
-        }
-        quadVertexBuffer = vertexBuffer
-
-        guard let sampler = FilterRenderer.makeDefaultSampler(device: device) else {
-            return nil
-        }
-        samplerState = sampler
-
-        do {
-            try buildPipeline(mtkView: mtkView)
-        } catch {
-            print("Failed to build pipeline: \(error)")
-            return nil
-        }
-        createIntermediateTextures(size: mtkView.drawableSize)
+        buildPipeline()
+        buildVertexBuffer()
+        buildSampler()
     }
 
-    func buildPipeline(mtkView: MTKView) throws {
-        guard let library = device.makeDefaultLibrary() else {
-            throw NSError(domain: "FilterRenderer", code: 1, userInfo: [NSLocalizedDescriptionKey: "Could not load Metal library"])
-        }
+    // MARK: - Public Setters
 
-        // Vertex and fragment functions for vertex warp + color effects
-        guard let vertexFunc = library.makeFunction(name: "vertexWarp"),
-              let fragmentFunc = library.makeFunction(name: "fragmentEffects") else {
-            throw NSError(domain: "FilterRenderer", code: 2, userInfo: [NSLocalizedDescriptionKey: "Failed to find vertexWarp or fragmentEffects function"])
-        }
-
-        let pipelineDesc = MTLRenderPipelineDescriptor()
-        pipelineDesc.vertexFunction = vertexFunc
-        pipelineDesc.fragmentFunction = fragmentFunc
-        pipelineDesc.colorAttachments[0].pixelFormat = mtkView.colorPixelFormat
-        pipelineDesc.vertexDescriptor = vertexDescriptor
-
-        pipelineState = try device.makeRenderPipelineState(descriptor: pipelineDesc)
-
-        // Compute pipelines for filters
-        guard let blurHFunc = library.makeFunction(name: "gaussianBlurHorizontal"),
-              let blurVFunc = library.makeFunction(name: "gaussianBlurVertical"),
-              let sobelFunc = library.makeFunction(name: "sobelEdgeDetection") else {
-            throw NSError(domain: "FilterRenderer", code: 3, userInfo: [NSLocalizedDescriptionKey: "Failed to find one or more compute shader functions"])
-        }
-
-        computePipelineBlurH = try device.makeComputePipelineState(function: blurHFunc)
-        computePipelineBlurV = try device.makeComputePipelineState(function: blurVFunc)
-        computePipelineSobel = try device.makeComputePipelineState(function: sobelFunc)
+    func setFilter(index: Int32) {
+        filterIndex = index
     }
 
-    func createIntermediateTextures(size: CGSize) {
-        let texDesc = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .bgra8Unorm,
-                                                               width: max(Int(size.width), 1),
-                                                               height: max(Int(size.height), 1),
-                                                               mipmapped: false)
-        texDesc.usage = [.shaderRead, .shaderWrite, .renderTarget]
-
-        intermediateTexture = device.makeTexture(descriptor: texDesc)
-        outputTexture = device.makeTexture(descriptor: texDesc)
+    func setWarpMode(_ mode: Int32) {
+        warpMode = mode
     }
 
-    func resize(size: CGSize) {
-        viewportSize = vector_uint2(UInt32(size.width), UInt32(size.height))
-        createIntermediateTextures(size: size)
+    func setBrightness(_ value: Float) {
+        brightness = value
     }
 
-    func setFilter(name: String) {
-        switch name.lowercased() {
-            case "none":
-                currentFilter = .none
-            case "gaussian blur", "blur", "gaussian":
-                currentFilter = .gaussianBlur
-            case "edge detection", "sobel", "edges":
-                currentFilter = .edgeDetection
-            case "vertexwarp", "vertex warp":
-                currentFilter = .vertexWarp
-            case "color effects", "coloreffects", "color effect":
-                currentFilter = .colorEffects
-            default:
-                currentFilter = .none
-        }
+    func setContrast(_ value: Float) {
+        contrast = value
     }
 
-    func applyComputeFilters(inputTexture: MTLTexture, commandBuffer: MTLCommandBuffer) -> MTLTexture {
-        func makeThreadgroupSizes(for pipeline: MTLComputePipelineState, texture: MTLTexture) -> (MTLSize, MTLSize) {
-            let w = pipeline.threadExecutionWidth
-            let h = max(pipeline.maxTotalThreadsPerThreadgroup / w, 1)
-            let threadsPerThreadgroup = MTLSizeMake(w, h, 1)
-            let threadsPerGrid = MTLSizeMake(texture.width, texture.height, 1)
-            return (threadsPerGrid, threadsPerThreadgroup)
-        }
-
-        switch currentFilter {
-        case .gaussianBlur:
-            if let encoderH = commandBuffer.makeComputeCommandEncoder() {
-                encoderH.setComputePipelineState(computePipelineBlurH)
-                encoderH.setTexture(inputTexture, index: 0)
-                encoderH.setTexture(intermediateTexture, index: 1)
-
-                let (threadsPerGrid, threadsPerThreadgroup) = makeThreadgroupSizes(for: computePipelineBlurH, texture: intermediateTexture)
-                encoderH.dispatchThreads(threadsPerGrid, threadsPerThreadgroup: threadsPerThreadgroup)
-                encoderH.endEncoding()
-            }
-
-            if let encoderV = commandBuffer.makeComputeCommandEncoder() {
-                encoderV.setComputePipelineState(computePipelineBlurV)
-                encoderV.setTexture(intermediateTexture, index: 0)
-                encoderV.setTexture(outputTexture, index: 1)
-
-                let (threadsPerGrid, threadsPerThreadgroup) = makeThreadgroupSizes(for: computePipelineBlurV, texture: outputTexture)
-                encoderV.dispatchThreads(threadsPerGrid, threadsPerThreadgroup: threadsPerThreadgroup)
-                encoderV.endEncoding()
-            }
-
-            return outputTexture
-
-        case .edgeDetection:
-            // Gaussian blur pass (horizontal)
-            if let encoderH = commandBuffer.makeComputeCommandEncoder() {
-                encoderH.setComputePipelineState(computePipelineBlurH)
-                encoderH.setTexture(inputTexture, index: 0)
-                encoderH.setTexture(intermediateTexture, index: 1)
-
-                let (threadsPerGrid, threadsPerThreadgroup) = makeThreadgroupSizes(for: computePipelineBlurH, texture: intermediateTexture)
-                encoderH.dispatchThreads(threadsPerGrid, threadsPerThreadgroup: threadsPerThreadgroup)
-                encoderH.endEncoding()
-            }
-
-            // Gaussian blur pass (vertical)
-            if let encoderV = commandBuffer.makeComputeCommandEncoder() {
-                encoderV.setComputePipelineState(computePipelineBlurV)
-                encoderV.setTexture(intermediateTexture, index: 0)
-                encoderV.setTexture(outputTexture, index: 1)
-
-                let (threadsPerGrid, threadsPerThreadgroup) = makeThreadgroupSizes(for: computePipelineBlurV, texture: outputTexture)
-                encoderV.dispatchThreads(threadsPerGrid, threadsPerThreadgroup: threadsPerThreadgroup)
-                encoderV.endEncoding()
-            }
-
-            // Sobel edge detection pass
-            if let encoderSobel = commandBuffer.makeComputeCommandEncoder() {
-                encoderSobel.setComputePipelineState(computePipelineSobel)
-                encoderSobel.setTexture(outputTexture, index: 0)
-                encoderSobel.setTexture(intermediateTexture, index: 1)
-
-                let (threadsPerGrid, threadsPerThreadgroup) = makeThreadgroupSizes(for: computePipelineSobel, texture: intermediateTexture)
-                encoderSobel.dispatchThreads(threadsPerGrid, threadsPerThreadgroup: threadsPerThreadgroup)
-                encoderSobel.endEncoding()
-            }
-
-            return intermediateTexture
-
-        case .vertexWarp, .colorEffects:
-            return inputTexture
-
-        case .none:
-            return inputTexture
-        }
+    func setVignetteStrength(_ value: Float) {
+        vignetteStrength = value
     }
 
-    func render(inputTexture: MTLTexture, drawable: CAMetalDrawable) {
-        guard let commandBuffer = commandQueue.makeCommandBuffer() else { return }
+    func setMagnifyCenter(_ center: SIMD2<Float>) {
+        magnifyCenter = center
+    }
 
-        time += 0.016 // approx 60 FPS
+    func setMagnifyRadius(_ radius: Float) {
+        magnifyRadius = radius
+    }
 
-        let filteredTexture = applyComputeFilters(inputTexture: inputTexture, commandBuffer: commandBuffer)
+    func setMagnifyStrength(_ strength: Float) {
+        magnifyStrength = strength
+    }
 
-        if currentFilter == .vertexWarp || currentFilter == .colorEffects {
-            let renderPassDesc = MTLRenderPassDescriptor()
-            renderPassDesc.colorAttachments[0].texture = drawable.texture
-            renderPassDesc.colorAttachments[0].loadAction = .clear
-            renderPassDesc.colorAttachments[0].storeAction = .store
-            renderPassDesc.colorAttachments[0].clearColor = MTLClearColorMake(0, 0, 0, 1)
+    // MARK: - Drawing
 
-            guard let renderEncoder = commandBuffer.makeRenderCommandEncoder(descriptor: renderPassDesc) else {
-                commandBuffer.commit()
-                return
-            }
+    func draw(in view: MTKView, inputTexture: MTLTexture) {
 
-            renderEncoder.setRenderPipelineState(pipelineState)
-            renderEncoder.setVertexBuffer(quadVertexBuffer, offset: 0, index: 0)
+        print("Filter index:", filterIndex)
+        print("Warp mode:", warpMode)
+        print("Brightness:", brightness, "Contrast:", contrast, "Vignette:", vignetteStrength)
 
-            var currentTime = time
-            renderEncoder.setVertexBytes(&currentTime, length: MemoryLayout<Float>.size, index: 2)
-
-            renderEncoder.setFragmentTexture(filteredTexture, index: 0)
-            renderEncoder.setFragmentSamplerState(samplerState, index: 0)
-
-            renderEncoder.setFragmentBytes(&currentTime, length: MemoryLayout<Float>.size, index: 0)
-
-            renderEncoder.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4)
-
-            renderEncoder.endEncoding()
-        } else {
-            if let blitEncoder = commandBuffer.makeBlitCommandEncoder() {
-                blitEncoder.copy(from: filteredTexture,
-                                 sourceSlice: 0,
-                                 sourceLevel: 0,
-                                 sourceOrigin: MTLOrigin(x: 0, y: 0, z: 0),
-                                 sourceSize: MTLSize(width: filteredTexture.width,
-                                                     height: filteredTexture.height,
-                                                     depth: 1),
-                                 to: drawable.texture,
-                                 destinationSlice: 0,
-                                 destinationLevel: 0,
-                                 destinationOrigin: MTLOrigin(x: 0, y: 0, z: 0))
-                blitEncoder.endEncoding()
-            }
+        guard let drawable = view.currentDrawable,
+              let renderPassDescriptor = view.currentRenderPassDescriptor else {
+            return
         }
 
+        renderPassDescriptor.colorAttachments[0].texture = drawable.texture
+        renderPassDescriptor.colorAttachments[0].loadAction = .clear
+        renderPassDescriptor.colorAttachments[0].clearColor = MTLClearColorMake(0, 0, 0, 1)
+        renderPassDescriptor.colorAttachments[0].storeAction = .store
+
+        guard let commandBuffer = commandQueue.makeCommandBuffer(),
+              let renderEncoder = commandBuffer.makeRenderCommandEncoder(descriptor: renderPassDescriptor) else {
+            return
+        }
+
+        // Prepare uniforms to match the shader's struct layout
+        let resolution = SIMD2<Float>(Float(view.drawableSize.width), Float(view.drawableSize.height))
+        let aspectRatio = resolution.x / resolution.y
+        let time = Float(CACurrentMediaTime())
+        let mouse = SIMD2<Float>(0, 0) // Update with touch input if available
+
+        var uniforms = Uniforms(
+            time: time,
+            resolution: resolution,
+            mouse: mouse,
+            center: magnifyCenter,
+            radius: magnifyRadius,
+            aspectRatio: aspectRatio,
+            brightness: brightness,
+            contrast: contrast,
+            vignetteStrength: vignetteStrength,
+            filterIndex: filterIndex,
+            warpIndex: warpMode
+        )
+
+        // Set pipeline and buffers
+        renderEncoder.setRenderPipelineState(pipelineState)
+        renderEncoder.setVertexBuffer(vertexBuffer, offset: 0, index: 0)
+
+        // Set uniform struct for both vertex and fragment shaders at buffer index 1
+        renderEncoder.setVertexBytes(&uniforms, length: MemoryLayout<Uniforms>.stride, index: 1)
+        renderEncoder.setFragmentBytes(&uniforms, length: MemoryLayout<Uniforms>.stride, index: 1)
+
+        // Set input texture and sampler for fragment shader
+        renderEncoder.setFragmentTexture(inputTexture, index: 0)
+        renderEncoder.setFragmentSamplerState(samplerState, index: 0)
+
+        // Draw full-screen quad
+        renderEncoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 6)
+        renderEncoder.endEncoding()
         commandBuffer.present(drawable)
         commandBuffer.commit()
     }
 
-    static func makeDefaultSampler(device: MTLDevice) -> MTLSamplerState? {
-        let desc = MTLSamplerDescriptor()
-        desc.minFilter = .linear
-        desc.magFilter = .linear
-        desc.mipFilter = .notMipmapped
-        desc.sAddressMode = .clampToEdge
-        desc.tAddressMode = .clampToEdge
-        return device.makeSamplerState(descriptor: desc)
+    // MARK: - Setup helpers
+
+    private func buildPipeline() {
+        guard let library = device.makeDefaultLibrary() else {
+            fatalError("Failed to load default Metal library")
+        }
+
+        guard let vertexFunction = library.makeFunction(name: "vertex_main"),
+              let fragmentFunction = library.makeFunction(name: "fragment_main") else {
+            fatalError("Failed to load shader functions")
+        }
+
+        let pipelineDescriptor = MTLRenderPipelineDescriptor()
+        pipelineDescriptor.vertexFunction = vertexFunction
+        pipelineDescriptor.fragmentFunction = fragmentFunction
+        pipelineDescriptor.colorAttachments[0].pixelFormat = mtkView.colorPixelFormat
+
+        let vertexDescriptor = MTLVertexDescriptor()
+        // Position attribute (float4)
+        vertexDescriptor.attributes[0].format = .float4
+        vertexDescriptor.attributes[0].offset = 0
+        vertexDescriptor.attributes[0].bufferIndex = 0
+        // Texture coordinate attribute (float2)
+        vertexDescriptor.attributes[1].format = .float2
+        vertexDescriptor.attributes[1].offset = MemoryLayout<Float>.stride * 4
+        vertexDescriptor.attributes[1].bufferIndex = 0
+        // Layout stride = 6 floats (4 pos + 2 uv)
+        vertexDescriptor.layouts[0].stride = MemoryLayout<Float>.stride * 6
+
+        pipelineDescriptor.vertexDescriptor = vertexDescriptor
+
+        do {
+            pipelineState = try device.makeRenderPipelineState(descriptor: pipelineDescriptor)
+        } catch {
+            fatalError("Failed to create pipeline state: \(error)")
+        }
     }
+
+    private func buildVertexBuffer() {
+        vertexBuffer = device.makeBuffer(bytes: vertices,
+                                         length: vertices.count * MemoryLayout<Float>.size,
+                                         options: [])
+    }
+
+    private func buildSampler() {
+        let samplerDescriptor = MTLSamplerDescriptor()
+        samplerDescriptor.minFilter = .linear
+        samplerDescriptor.magFilter = .linear
+        samplerDescriptor.mipFilter = .notMipmapped
+        samplerDescriptor.sAddressMode = .clampToEdge
+        samplerDescriptor.tAddressMode = .clampToEdge
+        samplerState = device.makeSamplerState(descriptor: samplerDescriptor)
+    }
+    
 }
