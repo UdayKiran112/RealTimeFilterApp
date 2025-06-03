@@ -25,6 +25,15 @@ class FilterRenderer {
     private var pipelineState: MTLRenderPipelineState!
     private var vertexBuffer: MTLBuffer!
     private var samplerState: MTLSamplerState!
+    
+    // Compute pipeline states for filters that need them
+    private var gaussianBlurHorizontalState: MTLComputePipelineState?
+    private var gaussianBlurVerticalState: MTLComputePipelineState?
+    private var sobelEdgeDetectionState: MTLComputePipelineState?
+    
+    // Temporary textures for multi-pass effects
+    private var tempTexture1: MTLTexture?
+    private var tempTexture2: MTLTexture?
 
     // Vertex data for a full-screen quad: position (float4) + texCoord (float2)
     private let vertices: [Float] = [
@@ -58,6 +67,7 @@ class FilterRenderer {
         self.commandQueue = queue
 
         buildPipeline()
+        buildComputePipelines()
         buildVertexBuffer()
         buildSampler()
     }
@@ -99,7 +109,6 @@ class FilterRenderer {
     // MARK: - Drawing
 
     func draw(in view: MTKView, inputTexture: MTLTexture) {
-
         print("Filter index:", filterIndex)
         print("Warp mode:", warpMode)
         print("Brightness:", brightness, "Contrast:", contrast, "Vignette:", vignetteStrength)
@@ -109,6 +118,16 @@ class FilterRenderer {
             return
         }
 
+        var finalTexture = inputTexture
+        
+        // Handle compute shader filters first
+        if filterIndex == 10 { // Gaussian Blur
+            finalTexture = applyGaussianBlur(to: inputTexture) ?? inputTexture
+        } else if filterIndex == 11 { // Edge Detection
+            finalTexture = applyEdgeDetection(to: inputTexture) ?? inputTexture
+        }
+
+        // Now render with the regular pipeline
         renderPassDescriptor.colorAttachments[0].texture = drawable.texture
         renderPassDescriptor.colorAttachments[0].loadAction = .clear
         renderPassDescriptor.colorAttachments[0].clearColor = MTLClearColorMake(0, 0, 0, 1)
@@ -148,7 +167,7 @@ class FilterRenderer {
         renderEncoder.setFragmentBytes(&uniforms, length: MemoryLayout<Uniforms>.stride, index: 1)
 
         // Set input texture and sampler for fragment shader
-        renderEncoder.setFragmentTexture(inputTexture, index: 0)
+        renderEncoder.setFragmentTexture(finalTexture, index: 0)
         renderEncoder.setFragmentSamplerState(samplerState, index: 0)
 
         // Draw full-screen quad
@@ -156,6 +175,95 @@ class FilterRenderer {
         renderEncoder.endEncoding()
         commandBuffer.present(drawable)
         commandBuffer.commit()
+    }
+    
+    // MARK: - Compute Shader Methods
+    
+    private func createTempTexturesIfNeeded(width: Int, height: Int) {
+        if tempTexture1 == nil || tempTexture1!.width != width || tempTexture1!.height != height {
+            let descriptor = MTLTextureDescriptor.texture2DDescriptor(
+                pixelFormat: .rgba8Unorm,
+                width: width,
+                height: height,
+                mipmapped: false
+            )
+            descriptor.usage = [.shaderRead, .shaderWrite]
+            tempTexture1 = device.makeTexture(descriptor: descriptor)
+            tempTexture2 = device.makeTexture(descriptor: descriptor)
+        }
+    }
+    
+    private func applyGaussianBlur(to texture: MTLTexture) -> MTLTexture? {
+        guard let horizontalState = gaussianBlurHorizontalState,
+              let verticalState = gaussianBlurVerticalState else { return nil }
+        
+        createTempTexturesIfNeeded(width: texture.width, height: texture.height)
+        guard let temp1 = tempTexture1, let temp2 = tempTexture2 else { return nil }
+        
+        guard let commandBuffer = commandQueue.makeCommandBuffer() else { return nil }
+        
+        // Horizontal pass
+        if let encoder = commandBuffer.makeComputeCommandEncoder() {
+            encoder.setComputePipelineState(horizontalState)
+            encoder.setTexture(texture, index: 0)
+            encoder.setTexture(temp1, index: 1)
+            let threadsPerGroup = MTLSize(width: 16, height: 16, depth: 1)
+            let numGroups = MTLSize(
+                width: (texture.width + 15) / 16,
+                height: (texture.height + 15) / 16,
+                depth: 1
+            )
+            encoder.dispatchThreadgroups(numGroups, threadsPerThreadgroup: threadsPerGroup)
+            encoder.endEncoding()
+        }
+        
+        // Vertical pass
+        if let encoder = commandBuffer.makeComputeCommandEncoder() {
+            encoder.setComputePipelineState(verticalState)
+            encoder.setTexture(temp1, index: 0)
+            encoder.setTexture(temp2, index: 1)
+            let threadsPerGroup = MTLSize(width: 16, height: 16, depth: 1)
+            let numGroups = MTLSize(
+                width: (texture.width + 15) / 16,
+                height: (texture.height + 15) / 16,
+                depth: 1
+            )
+            encoder.dispatchThreadgroups(numGroups, threadsPerThreadgroup: threadsPerGroup)
+            encoder.endEncoding()
+        }
+        
+        commandBuffer.commit()
+        commandBuffer.waitUntilCompleted()
+        
+        return temp2
+    }
+    
+    private func applyEdgeDetection(to texture: MTLTexture) -> MTLTexture? {
+        guard let edgeDetectionState = sobelEdgeDetectionState else { return nil }
+        
+        createTempTexturesIfNeeded(width: texture.width, height: texture.height)
+        guard let temp1 = tempTexture1 else { return nil }
+        
+        guard let commandBuffer = commandQueue.makeCommandBuffer() else { return nil }
+        
+        if let encoder = commandBuffer.makeComputeCommandEncoder() {
+            encoder.setComputePipelineState(edgeDetectionState)
+            encoder.setTexture(texture, index: 0)
+            encoder.setTexture(temp1, index: 1)
+            let threadsPerGroup = MTLSize(width: 16, height: 16, depth: 1)
+            let numGroups = MTLSize(
+                width: (texture.width + 15) / 16,
+                height: (texture.height + 15) / 16,
+                depth: 1
+            )
+            encoder.dispatchThreadgroups(numGroups, threadsPerThreadgroup: threadsPerGroup)
+            encoder.endEncoding()
+        }
+        
+        commandBuffer.commit()
+        commandBuffer.waitUntilCompleted()
+        
+        return temp1
     }
 
     // MARK: - Setup helpers
@@ -195,6 +303,24 @@ class FilterRenderer {
             fatalError("Failed to create pipeline state: \(error)")
         }
     }
+    
+    private func buildComputePipelines() {
+        guard let library = device.makeDefaultLibrary() else { return }
+        
+        do {
+            if let function = library.makeFunction(name: "gaussianBlurHorizontal") {
+                gaussianBlurHorizontalState = try device.makeComputePipelineState(function: function)
+            }
+            if let function = library.makeFunction(name: "gaussianBlurVertical") {
+                gaussianBlurVerticalState = try device.makeComputePipelineState(function: function)
+            }
+            if let function = library.makeFunction(name: "sobelEdgeDetection") {
+                sobelEdgeDetectionState = try device.makeComputePipelineState(function: function)
+            }
+        } catch {
+            print("Failed to create compute pipeline states: \(error)")
+        }
+    }
 
     private func buildVertexBuffer() {
         vertexBuffer = device.makeBuffer(bytes: vertices,
@@ -211,5 +337,4 @@ class FilterRenderer {
         samplerDescriptor.tAddressMode = .clampToEdge
         samplerState = device.makeSamplerState(descriptor: samplerDescriptor)
     }
-    
 }

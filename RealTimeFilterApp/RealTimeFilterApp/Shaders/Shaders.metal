@@ -4,16 +4,19 @@ using namespace metal;
 #define K_EPSILON 1e-5
 #define PI 3.14159265359
 
+// Must exactly match the Swift Uniforms struct
 struct Uniforms {
-    float2 resolution;
     float time;
-    int warpMode;       // 0: none, 1: sine wave, 2: magnify
-    int filterMode;     // 0=none, 1=grayscale ... 9=vignette
+    float2 resolution;
+    float2 mouse;
+    float2 center;           // magnifyCenter
+    float radius;            // magnifyRadius
+    float aspectRatio;
     float brightness;
     float contrast;
-    float2 magnifyCenter;
-    float magnifyRadius;
-    float magnifyStrength;
+    float vignetteStrength;
+    int filterIndex;         // Changed from filterMode
+    int warpIndex;          // Changed from warpMode
 };
 
 struct VertexIn {
@@ -55,8 +58,9 @@ vertex VertexOut vertex_main(VertexIn in [[stage_in]], constant Uniforms &u [[bu
     float4 pos = in.position;
     float2 uv = in.uv;
 
-    if (u.warpMode == 1) pos = sineWaveWarp(pos, uv, u.time);
-    else if (u.warpMode == 2) pos = magnifyingGlassWarp(pos, uv, u.magnifyCenter, u.magnifyRadius, u.magnifyStrength);
+    // Use warpIndex instead of warpMode
+    if (u.warpIndex == 1) pos = sineWaveWarp(pos, uv, u.time);
+    else if (u.warpIndex == 2) pos = magnifyingGlassWarp(pos, uv, u.center, u.radius, 0.2);
 
     out.position = pos;
     out.uv = uv;
@@ -82,7 +86,7 @@ float4 filterSepia(float4 c) {
 }
 
 float4 filterBrightness(float4 c, float amt) {
-    c.rgb = clamp(c.rgb + amt, 0.0, 1.0);
+    c.rgb = clamp(c.rgb * amt, 0.0, 1.0);
     return c;
 }
 
@@ -115,11 +119,11 @@ float4 applyFilmGrain(float4 c, float2 uv, float time) {
     return c;
 }
 
-float4 applyVignette(float4 c, float2 uv) {
+float4 applyVignette(float4 c, float2 uv, float strength) {
     float2 centered = uv - 0.5;
     float v = smoothstep(0.5, 0.8, length(centered));
     v = 1.0 - v; // invert to darken edges
-    c.rgb *= v;
+    c.rgb *= mix(1.0, v, strength);
     return c;
 }
 
@@ -131,7 +135,8 @@ fragment float4 fragment_main(VertexOut in [[stage_in]],
     float2 uv = in.uv;
     float4 c = tex.sample(s, uv);
 
-    switch (u.filterMode) {
+    // Use filterIndex instead of filterMode
+    switch (u.filterIndex) {
         case 1: c = filterGrayscale(c); break;
         case 2: c = filterInvert(c); break;
         case 3: c = filterSepia(c); break;
@@ -140,8 +145,9 @@ fragment float4 fragment_main(VertexOut in [[stage_in]],
         case 6: c = applyToneMapping(c); break;
         case 7: c = applyChromaticAberration(tex, uv, s); break;
         case 8: c = applyFilmGrain(c, uv, u.time); break;
-        case 9: c = applyVignette(c, uv); break;
-        default: break;
+        case 9: c = applyVignette(c, uv, u.vignetteStrength); break;
+        // Cases 10 and 11 (Gaussian Blur and Edge Detection) handled by compute shaders
+        default: break; // No filter applied
     }
 
     return float4(clamp(c.rgb, 0.0, 1.0), c.a);

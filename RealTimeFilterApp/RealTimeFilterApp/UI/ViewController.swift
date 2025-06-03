@@ -9,6 +9,10 @@ class ViewController: UIViewController, MTKViewDelegate {
 
     private var filterButton: UIButton!
     private var warpSegmentedControl: UISegmentedControl!
+    private var brightnessSlider: UISlider!
+    private var contrastSlider: UISlider!
+    private var vignetteSlider: UISlider!
+    private var magnifySlider: UISlider!
 
     private var selectedFilterIndex: Int32 = 0
     private var selectedWarpIndex: Int32 = 0
@@ -53,12 +57,17 @@ class ViewController: UIViewController, MTKViewDelegate {
 
         cameraManager.startCapturing()
 
-        setupFilterButton()
-        setupWarpSegmentedControl()
+        setupUI()
 
         // Apply default filter and warp mode
         filterRenderer.setFilter(index: selectedFilterIndex)
         filterRenderer.setWarpMode(selectedWarpIndex)
+        
+        // Set initial values for all parameters
+        filterRenderer.setBrightness(1.0)
+        filterRenderer.setContrast(1.0)
+        filterRenderer.setVignetteStrength(0.6)
+        filterRenderer.setMagnifyStrength(0.2)
     }
 
     override func viewWillDisappear(_ animated: Bool) {
@@ -66,98 +75,222 @@ class ViewController: UIViewController, MTKViewDelegate {
         cameraManager.stopCapturing()
     }
 
+    override func viewDidLayoutSubviews() {
+        super.viewDidLayoutSubviews()
+        layoutUI()
+    }
+
     // MARK: - UI Setup
+
+    private func setupUI() {
+        setupFilterButton()
+        setupWarpSegmentedControl()
+        setupSliders()
+        setupTapGesture()
+    }
 
     private func setupFilterButton() {
         filterButton = UIButton(type: .system)
-        filterButton.backgroundColor = UIColor.black.withAlphaComponent(0.6)
+        filterButton.backgroundColor = UIColor.black.withAlphaComponent(0.7)
         filterButton.setTitle("Filter: \(filters[Int(selectedFilterIndex)])", for: .normal)
         filterButton.setTitleColor(.white, for: .normal)
+        filterButton.titleLabel?.font = UIFont.systemFont(ofSize: 16, weight: .medium)
         filterButton.layer.cornerRadius = 8
         filterButton.addTarget(self, action: #selector(showFilterDropdown), for: .touchUpInside)
+        filterButton.translatesAutoresizingMaskIntoConstraints = false
 
         view.addSubview(filterButton)
-        updateFilterButtonFrame()
     }
 
     private func setupWarpSegmentedControl() {
         warpSegmentedControl = UISegmentedControl(items: warpModes)
         warpSegmentedControl.selectedSegmentIndex = Int(selectedWarpIndex)
         warpSegmentedControl.addTarget(self, action: #selector(warpModeChanged), for: .valueChanged)
-        warpSegmentedControl.backgroundColor = UIColor.black.withAlphaComponent(0.6)
-        warpSegmentedControl.tintColor = .white
+        warpSegmentedControl.backgroundColor = UIColor.black.withAlphaComponent(0.7)
+        warpSegmentedControl.selectedSegmentTintColor = UIColor.white
+        warpSegmentedControl.setTitleTextAttributes([.foregroundColor: UIColor.white], for: .normal)
+        warpSegmentedControl.setTitleTextAttributes([.foregroundColor: UIColor.black], for: .selected)
+        warpSegmentedControl.translatesAutoresizingMaskIntoConstraints = false
 
         view.addSubview(warpSegmentedControl)
-        updateWarpSegmentedControlFrame()
     }
 
-    // MARK: - Layout Adjustments
+    private func setupSliders() {
+        // Brightness Slider
+        let brightnessLabel = createLabel(text: "Brightness")
+        brightnessSlider = createSlider(minValue: 0.1, maxValue: 3.0, initialValue: 1.0)
+        brightnessSlider.addTarget(self, action: #selector(brightnessChanged), for: .valueChanged)
 
-    private func updateFilterButtonFrame() {
-        let buttonWidth: CGFloat = 200
-        let buttonHeight: CGFloat = 40
-        let margin: CGFloat = 16
-        let safeInsets = view.safeAreaInsets
+        // Contrast Slider
+        let contrastLabel = createLabel(text: "Contrast")
+        contrastSlider = createSlider(minValue: 0.1, maxValue: 3.0, initialValue: 1.0)
+        contrastSlider.addTarget(self, action: #selector(contrastChanged), for: .valueChanged)
 
-        filterButton.frame = CGRect(
-            x: view.bounds.width - buttonWidth - margin,
-            y: view.bounds.height - buttonHeight - margin - safeInsets.bottom,
-            width: buttonWidth,
-            height: buttonHeight
-        )
+        // Vignette Slider
+        let vignetteLabel = createLabel(text: "Vignette")
+        vignetteSlider = createSlider(minValue: 0.0, maxValue: 1.0, initialValue: 0.6)
+        vignetteSlider.addTarget(self, action: #selector(vignetteChanged), for: .valueChanged)
+
+        // Magnify Slider
+        let magnifyLabel = createLabel(text: "Magnify Strength")
+        magnifySlider = createSlider(minValue: 0.0, maxValue: 1.0, initialValue: 0.2)
+        magnifySlider.addTarget(self, action: #selector(magnifyChanged), for: .valueChanged)
+
+        // Add sliders and labels to view
+        let stackView = UIStackView(arrangedSubviews: [
+            brightnessLabel, brightnessSlider,
+            contrastLabel, contrastSlider,
+            vignetteLabel, vignetteSlider,
+            magnifyLabel, magnifySlider
+        ])
+        stackView.axis = .vertical
+        stackView.spacing = 8
+        stackView.translatesAutoresizingMaskIntoConstraints = false
+
+        view.addSubview(stackView)
+
+        // Store reference for layout
+        stackView.tag = 100
     }
 
-    private func updateWarpSegmentedControlFrame() {
-        let width: CGFloat = 280
-        let height: CGFloat = 30
-        let margin: CGFloat = 16
-        let safeInsets = view.safeAreaInsets
-
-        warpSegmentedControl.frame = CGRect(
-            x: view.bounds.width - width - margin,
-            y: view.bounds.height - height - margin - safeInsets.bottom - 50,
-            width: width,
-            height: height
-        )
+    private func createLabel(text: String) -> UILabel {
+        let label = UILabel()
+        label.text = text
+        label.textColor = .white
+        label.font = UIFont.systemFont(ofSize: 14, weight: .medium)
+        label.backgroundColor = UIColor.black.withAlphaComponent(0.7)
+        label.textAlignment = .center
+        label.layer.cornerRadius = 4
+        label.clipsToBounds = true
+        return label
     }
 
-    // MARK: - UI Actions
-
-    @objc private func warpModeChanged() {
-        selectedWarpIndex = Int32(warpSegmentedControl.selectedSegmentIndex)
-        filterRenderer.setWarpMode(selectedWarpIndex)
-        mtkView.setNeedsDisplay()
+    private func createSlider(minValue: Float, maxValue: Float, initialValue: Float) -> UISlider {
+        let slider = UISlider()
+        slider.minimumValue = minValue
+        slider.maximumValue = maxValue
+        slider.value = initialValue
+        slider.minimumTrackTintColor = .white
+        slider.maximumTrackTintColor = .gray
+        slider.thumbTintColor = .white
+        return slider
     }
+
+    private func setupTapGesture() {
+        let tapGesture = UITapGestureRecognizer(target: self, action: #selector(handleTap(_:)))
+        mtkView.addGestureRecognizer(tapGesture)
+    }
+
+    private func layoutUI() {
+        let safeArea = view.safeAreaLayoutGuide
+        
+        // Filter button constraints
+        NSLayoutConstraint.activate([
+            filterButton.topAnchor.constraint(equalTo: safeArea.topAnchor, constant: 20),
+            filterButton.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 20),
+            filterButton.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -20),
+            filterButton.heightAnchor.constraint(equalToConstant: 44)
+        ])
+
+        // Warp control constraints
+        NSLayoutConstraint.activate([
+            warpSegmentedControl.topAnchor.constraint(equalTo: filterButton.bottomAnchor, constant: 10),
+            warpSegmentedControl.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 20),
+            warpSegmentedControl.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -20),
+            warpSegmentedControl.heightAnchor.constraint(equalToConstant: 32)
+        ])
+
+        // Slider stack view constraints
+        if let stackView = view.viewWithTag(100) {
+            NSLayoutConstraint.activate([
+                stackView.bottomAnchor.constraint(equalTo: safeArea.bottomAnchor, constant: -20),
+                stackView.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 20),
+                stackView.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -20)
+            ])
+        }
+    }
+
+    // MARK: - Actions
 
     @objc private func showFilterDropdown() {
-        let alert = UIAlertController(title: "Choose Filter", message: nil, preferredStyle: .actionSheet)
+        let alertController = UIAlertController(title: "Select Filter", message: nil, preferredStyle: .actionSheet)
 
         for (index, filterName) in filters.enumerated() {
-            alert.addAction(UIAlertAction(title: filterName, style: .default, handler: { _ in
-                self.selectedFilterIndex = Int32(index)
-                self.filterButton.setTitle("Filter: \(filterName)", for: .normal)
-                self.filterRenderer.setFilter(index: self.selectedFilterIndex)
-                self.mtkView.setNeedsDisplay()
-            }))
+            let action = UIAlertAction(title: filterName, style: .default) { [weak self] _ in
+                self?.applyFilter(index: Int32(index))
+            }
+            // Mark current selection
+            if index == selectedFilterIndex {
+                action.setValue(true, forKey: "checked")
+            }
+            alertController.addAction(action)
         }
 
-        alert.addAction(UIAlertAction(title: "Cancel", style: .cancel, handler: nil))
+        let cancelAction = UIAlertAction(title: "Cancel", style: .cancel)
+        alertController.addAction(cancelAction)
 
-        // iPad-safe
-        if let popover = alert.popoverPresentationController {
+        // For iPad support
+        if let popover = alertController.popoverPresentationController {
             popover.sourceView = filterButton
             popover.sourceRect = filterButton.bounds
         }
 
-        present(alert, animated: true, completion: nil)
+        present(alertController, animated: true)
+    }
+
+    @objc private func warpModeChanged() {
+        selectedWarpIndex = Int32(warpSegmentedControl.selectedSegmentIndex)
+        filterRenderer.setWarpMode(selectedWarpIndex)
+    }
+
+    @objc private func brightnessChanged() {
+        print("Brightness changed to: \(brightnessSlider.value)")
+        filterRenderer.setBrightness(brightnessSlider.value)
+    }
+
+    @objc private func contrastChanged() {
+        print("Contrast changed to: \(contrastSlider.value)")
+        filterRenderer.setContrast(contrastSlider.value)
+    }
+
+    @objc private func vignetteChanged() {
+        print("Vignette changed to: \(vignetteSlider.value)")
+        filterRenderer.setVignetteStrength(vignetteSlider.value)
+    }
+
+    @objc private func magnifyChanged() {
+        print("Magnify strength changed to: \(magnifySlider.value)")
+        filterRenderer.setMagnifyStrength(magnifySlider.value)
+    }
+
+    @objc private func handleTap(_ gesture: UITapGestureRecognizer) {
+        // Handle tap for magnify effect center
+        if selectedWarpIndex == 2 { // Magnify mode
+            let location = gesture.location(in: mtkView)
+            let normalizedX = Float(location.x / mtkView.bounds.width)
+            let normalizedY = Float(1.0 - (location.y / mtkView.bounds.height)) // Flip Y
+            
+            print("Setting magnify center to: \(normalizedX), \(normalizedY)")
+            filterRenderer.setMagnifyCenter(SIMD2<Float>(normalizedX, normalizedY))
+        }
+    }
+
+    private func applyFilter(index: Int32) {
+        selectedFilterIndex = index
+        print("Applying filter index: \(index)")
+        filterRenderer.setFilter(index: index)
+        filterButton.setTitle("Filter: \(filters[Int(index)])", for: .normal)
+        
+        // Reset sliders to their current values to ensure they work with the new filter
+        filterRenderer.setBrightness(brightnessSlider.value)
+        filterRenderer.setContrast(contrastSlider.value)
+        filterRenderer.setVignetteStrength(vignetteSlider.value)
     }
 
     // MARK: - MTKViewDelegate
 
     func mtkView(_ view: MTKView, drawableSizeWillChange size: CGSize) {
-//        filterRenderer.resize(size: size)
-        updateFilterButtonFrame()
-        updateWarpSegmentedControlFrame()
+        // Handle drawable size changes if needed
     }
 
     func draw(in view: MTKView) {
