@@ -44,13 +44,27 @@ float4 sineWaveWarp(float4 pos, float2 uv, float time) {
 }
 
 float4 magnifyingGlassWarp(float4 pos, float2 uv, float2 center, float radius, float strength) {
-    float dist = distance(uv, center);
-    if (dist < radius) {
-        float factor = smoothstep(radius, 0.0, dist); // stronger at center
-        float2 dir = safeNormalize(center - uv);
-        float2 offset = dir * factor * strength * 2.0; // *2.0 to convert UV delta to clip space delta
-        pos.xy += offset;
+    // Convert UV coordinates to match the center coordinates
+    float2 adjustedUV = uv;
+    adjustedUV.y = 1.0 - adjustedUV.y; // Flip Y to match touch coordinates
+    
+    float dist = distance(adjustedUV, center);
+    
+    if (dist < radius && strength > 0.001) {
+        // Calculate the magnification factor
+        float factor = 1.0 - smoothstep(0.0, radius, dist);
+        factor *= strength;
+        
+        // Direction from center to current point
+        float2 direction = normalize(adjustedUV - center);
+        
+        // Apply magnification displacement
+        float2 offset = direction * factor * 0.3; // Adjust multiplier as needed
+        
+        // Convert back to clip space
+        pos.xy += offset * 2.0; // Scale to clip space range
     }
+    
     return pos;
 }
 
@@ -126,9 +140,14 @@ float4 applyFilmGrain(float4 c, float2 uv, float time) {
 
 float4 applyVignette(float4 c, float2 uv, float strength) {
     float2 centered = uv - 0.5;
-    float v = smoothstep(0.5, 0.8, length(centered));
-    v = 1.0 - v; // invert to darken edges
-    c.rgb *= mix(1.0, v, strength);
+    float dist = length(centered);
+    
+    // Improved vignette calculation for more visible effect
+    float vignette = 1.0 - smoothstep(0.2, 0.8, dist * strength * 2.0);
+    
+    // Mix between original and vignetted color
+    c.rgb *= mix(1.0, vignette, strength);
+    
     return c;
 }
 
@@ -148,22 +167,24 @@ fragment float4 fragment_main(VertexOut in [[stage_in]],
         case 6: c = applyToneMapping(c); break;
         case 7: c = applyChromaticAberration(tex, uv, s); break;
         case 8: c = applyFilmGrain(c, uv, u.time); break;
+        case 9: c = applyVignette(c, uv, u.vignetteStrength);break;
         // Cases 10 and 11 (Gaussian Blur and Edge Detection) handled by compute shaders
         default: break; // No specific filter applied
     }
     
     // Apply brightness adjustment (works for all filters including "None")
-    if (u.brightness != 1.0) {
+    if (u.brightness != 1.0 && u.filterIndex != 4) {
         c = filterBrightness(c, u.brightness);
     }
     
     // Apply contrast adjustment (works for all filters including "None")
-    if (u.contrast != 1.0) {
+    if (u.contrast != 1.0 && u.filterIndex != 5) {
         c = filterContrast(c, u.contrast);
     }
     
     // Apply vignette (works for all filters including "None")
-    if (u.vignetteStrength > 0.0) {
+    // Debug: Make sure vignette is always applied when strength > 0
+    if (u.vignetteStrength > 0.001 && u.filterIndex != 9) {
         c = applyVignette(c, uv, u.vignetteStrength);
     }
 

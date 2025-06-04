@@ -48,15 +48,15 @@ class FilterRenderer {
 
     // Runtime-controlled filter/wave modes and filter parameters
     private var filterIndex: Int32 = 0
-    private var warpMode: Int32 = 0
+    private var warpIndex: Int32 = 0  // Changed from warpMode to warpIndex to match shader
     private var brightness: Float = 1.0
     private var contrast: Float = 1.0
-    private var vignetteStrength: Float = 0.6
+    private var vignetteStrength: Float = 0.0  // Changed from 0.6 to 0.0 as default
 
     // Magnify warp settings
     private var magnifyCenter = SIMD2<Float>(0.5, 0.5)
     private var magnifyRadius: Float = 0.2
-    private var magnifyStrength: Float = 0.2
+    private var magnifyStrength: Float = 0.0  // Changed from 0.2 to 0.0 as default
 
     init(device: MTLDevice, mtkView: MTKView) {
         self.device = device
@@ -81,8 +81,8 @@ class FilterRenderer {
     }
 
     func setWarpMode(_ mode: Int32) {
-        warpMode = mode
-        print("FilterRenderer: Set warp mode to \(mode)")
+        warpIndex = mode  // Changed from warpMode to warpIndex
+        print("FilterRenderer: Set warp index to \(mode)")
     }
 
     func setBrightness(_ value: Float) {
@@ -120,7 +120,7 @@ class FilterRenderer {
     func draw(in view: MTKView, inputTexture: MTLTexture) {
         print("=== FilterRenderer Draw ===")
         print("Filter index:", filterIndex)
-        print("Warp mode:", warpMode)
+        print("Warp index:", warpIndex)
         print("Brightness:", brightness, "Contrast:", contrast, "Vignette:", vignetteStrength)
         print("Magnify - Center:", magnifyCenter, "Radius:", magnifyRadius, "Strength:", magnifyStrength)
 
@@ -170,7 +170,7 @@ class FilterRenderer {
             contrast: contrast,
             vignetteStrength: vignetteStrength,
             filterIndex: filterIndex,
-            warpIndex: warpMode,
+            warpIndex: warpIndex,  // Now using warpIndex consistently
             magnifyStrength: magnifyStrength  // Now properly passed to shaders
         )
 
