@@ -17,6 +17,7 @@ struct Uniforms {
     float vignetteStrength;
     int filterIndex;         // Changed from filterMode
     int warpIndex;          // Changed from warpMode
+    float magnifyStrength;   // Add magnifyStrength field
 };
 
 struct VertexIn {
@@ -58,9 +59,13 @@ vertex VertexOut vertex_main(VertexIn in [[stage_in]], constant Uniforms &u [[bu
     float4 pos = in.position;
     float2 uv = in.uv;
 
-    // Use warpIndex instead of warpMode
-    if (u.warpIndex == 1) pos = sineWaveWarp(pos, uv, u.time);
-    else if (u.warpIndex == 2) pos = magnifyingGlassWarp(pos, uv, u.center, u.radius, 0.2);
+    // Use warpIndex instead of warpMode and pass magnify strength from uniforms
+    if (u.warpIndex == 1) {
+        pos = sineWaveWarp(pos, uv, u.time);
+    } else if (u.warpIndex == 2) {
+        // Use magnify strength from uniforms instead of hardcoded value
+        pos = magnifyingGlassWarp(pos, uv, u.center, u.radius, u.magnifyStrength);
+    }
 
     out.position = pos;
     out.uv = uv;
@@ -135,19 +140,31 @@ fragment float4 fragment_main(VertexOut in [[stage_in]],
     float2 uv = in.uv;
     float4 c = tex.sample(s, uv);
 
-    // Use filterIndex instead of filterMode
+    // Apply specific filters first
     switch (u.filterIndex) {
         case 1: c = filterGrayscale(c); break;
         case 2: c = filterInvert(c); break;
         case 3: c = filterSepia(c); break;
-        case 4: c = filterBrightness(c, u.brightness); break;
-        case 5: c = filterContrast(c, u.contrast); break;
         case 6: c = applyToneMapping(c); break;
         case 7: c = applyChromaticAberration(tex, uv, s); break;
         case 8: c = applyFilmGrain(c, uv, u.time); break;
-        case 9: c = applyVignette(c, uv, u.vignetteStrength); break;
         // Cases 10 and 11 (Gaussian Blur and Edge Detection) handled by compute shaders
-        default: break; // No filter applied
+        default: break; // No specific filter applied
+    }
+    
+    // Apply brightness adjustment (works for all filters including "None")
+    if (u.brightness != 1.0) {
+        c = filterBrightness(c, u.brightness);
+    }
+    
+    // Apply contrast adjustment (works for all filters including "None")
+    if (u.contrast != 1.0) {
+        c = filterContrast(c, u.contrast);
+    }
+    
+    // Apply vignette (works for all filters including "None")
+    if (u.vignetteStrength > 0.0) {
+        c = applyVignette(c, uv, u.vignetteStrength);
     }
 
     return float4(clamp(c.rgb, 0.0, 1.0), c.a);

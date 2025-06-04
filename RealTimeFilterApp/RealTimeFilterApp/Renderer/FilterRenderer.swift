@@ -2,7 +2,7 @@ import Metal
 import MetalKit
 import simd
 
-// Must exactly match the `Uniforms` struct in your shaders.metal
+// Updated Uniforms struct to include magnifyStrength
 struct Uniforms {
     var time: Float
     var resolution: SIMD2<Float>
@@ -15,6 +15,7 @@ struct Uniforms {
     var vignetteStrength: Float
     var filterIndex: Int32
     var warpIndex: Int32
+    var magnifyStrength: Float  // Add this field
 }
 
 class FilterRenderer {
@@ -76,45 +77,56 @@ class FilterRenderer {
 
     func setFilter(index: Int32) {
         filterIndex = index
+        print("FilterRenderer: Set filter index to \(index)")
     }
 
     func setWarpMode(_ mode: Int32) {
         warpMode = mode
+        print("FilterRenderer: Set warp mode to \(mode)")
     }
 
     func setBrightness(_ value: Float) {
         brightness = value
+        print("FilterRenderer: Set brightness to \(value)")
     }
 
     func setContrast(_ value: Float) {
         contrast = value
+        print("FilterRenderer: Set contrast to \(value)")
     }
 
     func setVignetteStrength(_ value: Float) {
         vignetteStrength = value
+        print("FilterRenderer: Set vignette strength to \(value)")
     }
 
     func setMagnifyCenter(_ center: SIMD2<Float>) {
         magnifyCenter = center
+        print("FilterRenderer: Set magnify center to \(center)")
     }
 
     func setMagnifyRadius(_ radius: Float) {
         magnifyRadius = radius
+        print("FilterRenderer: Set magnify radius to \(radius)")
     }
 
     func setMagnifyStrength(_ strength: Float) {
         magnifyStrength = strength
+        print("FilterRenderer: Set magnify strength to \(strength)")
     }
 
     // MARK: - Drawing
 
     func draw(in view: MTKView, inputTexture: MTLTexture) {
+        print("=== FilterRenderer Draw ===")
         print("Filter index:", filterIndex)
         print("Warp mode:", warpMode)
         print("Brightness:", brightness, "Contrast:", contrast, "Vignette:", vignetteStrength)
+        print("Magnify - Center:", magnifyCenter, "Radius:", magnifyRadius, "Strength:", magnifyStrength)
 
         guard let drawable = view.currentDrawable,
               let renderPassDescriptor = view.currentRenderPassDescriptor else {
+            print("Failed to get drawable or render pass descriptor")
             return
         }
 
@@ -122,8 +134,10 @@ class FilterRenderer {
         
         // Handle compute shader filters first
         if filterIndex == 10 { // Gaussian Blur
+            print("Applying Gaussian Blur")
             finalTexture = applyGaussianBlur(to: inputTexture) ?? inputTexture
         } else if filterIndex == 11 { // Edge Detection
+            print("Applying Edge Detection")
             finalTexture = applyEdgeDetection(to: inputTexture) ?? inputTexture
         }
 
@@ -135,6 +149,7 @@ class FilterRenderer {
 
         guard let commandBuffer = commandQueue.makeCommandBuffer(),
               let renderEncoder = commandBuffer.makeRenderCommandEncoder(descriptor: renderPassDescriptor) else {
+            print("Failed to create command buffer or render encoder")
             return
         }
 
@@ -155,8 +170,17 @@ class FilterRenderer {
             contrast: contrast,
             vignetteStrength: vignetteStrength,
             filterIndex: filterIndex,
-            warpIndex: warpMode
+            warpIndex: warpMode,
+            magnifyStrength: magnifyStrength  // Now properly passed to shaders
         )
+
+        print("Uniforms being sent to shader:")
+        print("  - brightness: \(uniforms.brightness)")
+        print("  - contrast: \(uniforms.contrast)")
+        print("  - vignetteStrength: \(uniforms.vignetteStrength)")
+        print("  - magnifyStrength: \(uniforms.magnifyStrength)")
+        print("  - filterIndex: \(uniforms.filterIndex)")
+        print("  - warpIndex: \(uniforms.warpIndex)")
 
         // Set pipeline and buffers
         renderEncoder.setRenderPipelineState(pipelineState)
